@@ -29,6 +29,18 @@ function Find-FFmpeg {
     return $null
 }
 
+function Find-Tailscale {
+    $command = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command) { return $command.Source }
+    foreach ($candidate in @(
+        "$env:ProgramFiles\Tailscale\tailscale.exe",
+        "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return (Resolve-Path -LiteralPath $candidate).Path }
+    }
+    return $null
+}
+
 function Get-DirectShowAudioDevices([string]$FFmpegPath) {
     $lines = & $FFmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1
     $names = @()
@@ -39,13 +51,48 @@ function Get-DirectShowAudioDevices([string]$FFmpegPath) {
     return $names
 }
 
-function Find-LikelyMacIP {
+function Find-MacViaTailscale {
+    $ts = Find-Tailscale
+    if ($null -eq $ts) { return $null }
+    try {
+        $raw = (& $ts status --json 2>$null) -join "`n"
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        $status = $raw | ConvertFrom-Json
+        $peers = @()
+        if ($null -ne $status.Peer) {
+            $peers = @($status.Peer.PSObject.Properties | ForEach-Object { $_.Value })
+        }
+        $macs = @($peers | Where-Object {
+            $os = [string]$_.OS
+            $online = if ($_.PSObject.Properties.Name -contains 'Online') { [bool]$_.Online } else { $true }
+            $online -and $os -match '(?i)mac|darwin' -and $null -ne $_.TailscaleIPs
+        })
+        if ($macs.Count -eq 1) {
+            $ip = @($macs[0].TailscaleIPs | Where-Object { $_ -match '^100\.' } | Select-Object -First 1)
+            if ($ip.Count -eq 1) {
+                Write-Host "Auto-detected Mac through Tailscale: $($ip[0])" -ForegroundColor Green
+                return $ip[0]
+            }
+        }
+        if ($macs.Count -gt 1) {
+            Write-Host 'Multiple online Macs were found in Tailscale:'
+            for ($i = 0; $i -lt $macs.Count; $i++) {
+                $ip = @($macs[$i].TailscaleIPs | Where-Object { $_ -match '^100\.' } | Select-Object -First 1)
+                $name = if ($macs[$i].DNSName) { ([string]$macs[$i].DNSName).TrimEnd('.') } else { [string]$macs[$i].HostName }
+                Write-Host ('  [{0}] {1}  {2}' -f ($i + 1), $name, ($ip -join ''))
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Find-LikelyLocalMacIP {
     try {
         $candidates = @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop |
             Where-Object { $_.IPAddress -match '^192\.168\.137\.' -and $_.IPAddress -ne '192.168.137.1' -and $_.State -ne 'Unreachable' } |
             Select-Object -ExpandProperty IPAddress -Unique)
         if ($candidates.Count -eq 1) {
-            Write-Host "Auto-detected likely Mac Bluetooth/PAN address: $($candidates[0])" -ForegroundColor Green
+            Write-Host "Auto-detected likely Mac on Windows hotspot/PAN: $($candidates[0])" -ForegroundColor Green
             return $candidates[0]
         }
     } catch {}
@@ -54,9 +101,15 @@ function Find-LikelyMacIP {
 
 function Read-IPv4Address([string]$ExistingValue) {
     $value = $ExistingValue
-    if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-LikelyMacIP }
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-MacViaTailscale }
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-LikelyLocalMacIP }
     while ($true) {
-        if ([string]::IsNullOrWhiteSpace($value)) { $value = Read-Host 'Enter the Mac Bluetooth/PAN IPv4 address shown by the Mac receiver' }
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            Write-Host ''
+            Write-Host 'Automatic Mac discovery did not find a reachable Mac.' -ForegroundColor Yellow
+            Write-Host 'On different phone hotspots, use the 100.x Tailscale address printed by the Mac receiver.' -ForegroundColor Yellow
+            $value = Read-Host 'Mac IPv4 address'
+        }
         [System.Net.IPAddress]$parsed = $null
         if ([System.Net.IPAddress]::TryParse($value, [ref]$parsed) -and $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $value -ne '0.0.0.0') { return $value }
         Write-Host "'$value' is not a usable IPv4 address." -ForegroundColor Yellow
@@ -70,7 +123,7 @@ function Select-AudioDevice([string[]]$Devices, [string]$RequestedDevice) {
         if ($null -ne $exact) { return $exact }
     }
 
-    $preferred = @($Devices | Where-Object { $_ -match '(?i)VoiceMeeter Output|Stereo Mix|What U Hear' })
+    $preferred = @($Devices | Where-Object { $_ -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear' })
     if ($preferred.Count -eq 1) {
         Write-Host "Auto-selected system-audio capture source: $($preferred[0])" -ForegroundColor Green
         return $preferred[0]
@@ -78,13 +131,22 @@ function Select-AudioDevice([string[]]$Devices, [string]$RequestedDevice) {
 
     Write-Host 'Available Windows recording/capture devices:'
     for ($i = 0; $i -lt $Devices.Count; $i++) {
-        $marker = if ($Devices[$i] -match '(?i)VoiceMeeter Output|Stereo Mix|What U Hear') { '  <-- likely system audio' } else { '' }
+        $marker = if ($Devices[$i] -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear') { '  <-- system audio candidate' } else { '' }
         Write-Host ('  [{0}] {1}{2}' -f ($i + 1), $Devices[$i], $marker)
     }
+
+    if ($preferred.Count -eq 0) {
+        Write-Host ''
+        Write-Host 'No system-playback capture endpoint was found.' -ForegroundColor Yellow
+        Write-Host 'Do NOT choose the microphone if you want the laptop sound.' -ForegroundColor Yellow
+        Write-Host 'Enable Stereo Mix if the audio driver provides it, or install VoiceMeeter so Windows exposes a recordable playback copy.' -ForegroundColor Yellow
+        throw 'System-audio capture endpoint missing (Stereo Mix / What U Hear / VoiceMeeter Output / virtual-audio-capturer).'
+    }
+
     do {
-        $selection = Read-Host 'Choose the capture-device number'
+        $selection = Read-Host 'Choose the system-audio capture-device number'
         $number = 0
-    } until ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $Devices.Count)
+    } until ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $Devices.Count -and $Devices[$number - 1] -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear')
     return $Devices[$number - 1]
 }
 
@@ -96,7 +158,7 @@ Write-Host ''
 $ffmpeg = Find-FFmpeg
 if ($null -eq $ffmpeg) { throw 'FFmpeg was not found. Rerun the GitHub AudioBridge one-liner.' }
 $devices = @(Get-DirectShowAudioDevices $ffmpeg)
-if ($devices.Count -eq 0) { throw 'No Windows audio capture devices were found. Enable Stereo Mix or install/configure VoiceMeeter.' }
+if ($devices.Count -eq 0) { throw 'No Windows audio capture devices were found at all.' }
 
 $selectedDevice = Select-AudioDevice $devices $Device
 $MacIP = Read-IPv4Address $MacIP
@@ -106,7 +168,8 @@ Write-Host ''
 Write-Host "Capture device: $selectedDevice"
 Write-Host "Destination:    $MacIP UDP/$Port"
 Write-Host "Audio bitrate:  $Bitrate"
-Write-Host 'Streaming started. Control-C stops it.' -ForegroundColor Green
+Write-Host 'Streaming started. Existing Windows playback is not stopped by this sender.' -ForegroundColor Green
+Write-Host 'Control-C stops only the AudioBridge stream.' -ForegroundColor Green
 Write-Host ''
 
 $arguments = @(
@@ -118,4 +181,5 @@ $arguments = @(
 )
 
 & $ffmpeg @arguments
-exit $LASTEXITCODE
+$code = $LASTEXITCODE
+if ($code -ne 0) { throw "FFmpeg sender exited with code $code." }
