@@ -38,8 +38,7 @@ printf '-----------------------\n'
 
 TS="$(find_tailscale_cli || true)"
 if [ -z "$TS" ] && [ -n "$BREW" ]; then
-  printf 'No Bluetooth/PAN interface was detected in the previous run.\n'
-  printf 'Installing Tailscale as the automatic fallback for separate phone hotspots...\n'
+  printf 'Installing Tailscale as an optional fallback when no shared LAN or Bluetooth/PAN route is available...\n'
   "$BREW" install --cask tailscale-app || "$BREW" install --cask tailscale || true
   TS="$(find_tailscale_cli || true)"
 fi

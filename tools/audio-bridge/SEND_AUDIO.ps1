@@ -86,32 +86,72 @@ function Find-MacViaTailscale {
     return $null
 }
 
-function Find-LikelyLocalMacIP {
+function Test-UsableIPv4([string]$Address) {
+    [System.Net.IPAddress]$parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) { return $false }
+    if ($parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $false }
+    $octets = $parsed.GetAddressBytes()
+    return $octets[0] -ne 0 -and $octets[0] -ne 127 -and $octets[0] -lt 224 -and $Address -ne '255.255.255.255'
+}
+
+function Find-MacViaPan {
     try {
-        $candidates = @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop |
-            Where-Object { $_.IPAddress -match '^192\.168\.137\.' -and $_.IPAddress -ne '192.168.137.1' -and $_.State -ne 'Unreachable' } |
-            Select-Object -ExpandProperty IPAddress -Unique)
+        $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {
+            ("{0} {1}" -f $_.Name, $_.InterfaceDescription) -match '(?i)Bluetooth|Personal Area Network|\bPAN\b'
+        })
+        if ($adapters.Count -eq 0) {
+            Write-Host 'No Bluetooth/PAN interface was detected. Wi-Fi or Ethernet can still be used.' -ForegroundColor Yellow
+            return $null
+        }
+
+        $activeAdapters = @($adapters | Where-Object { $_.Status -eq 'Up' })
+        if ($activeAdapters.Count -eq 0) {
+            Write-Host 'A Bluetooth/PAN interface exists, but it is not connected. Wi-Fi or Ethernet can still be used.' -ForegroundColor Yellow
+            return $null
+        }
+
+        $localAddresses = @(foreach ($adapter in $activeAdapters) {
+            Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty IPAddress
+        })
+        $candidates = @()
+        foreach ($adapter in $activeAdapters) {
+            $neighbors = @(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.State -notin @('Unreachable', 'Incomplete') })
+            foreach ($neighbor in $neighbors) {
+                if ((Test-UsableIPv4 $neighbor.IPAddress) -and $localAddresses -notcontains $neighbor.IPAddress -and $candidates -notcontains $neighbor.IPAddress) {
+                    $candidates += $neighbor.IPAddress
+                }
+            }
+        }
         if ($candidates.Count -eq 1) {
-            Write-Host "Auto-detected likely Mac on Windows hotspot/PAN: $($candidates[0])" -ForegroundColor Green
+            Write-Host "Auto-detected the only usable Bluetooth/PAN neighbor: $($candidates[0])" -ForegroundColor Green
             return $candidates[0]
         }
-    } catch {}
+        if ($candidates.Count -gt 1) {
+            Write-Host ("Multiple Bluetooth/PAN neighbors were detected: {0}" -f ($candidates -join ', ')) -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host ("Bluetooth/PAN auto-detection could not run: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
     return $null
 }
 
 function Read-IPv4Address([string]$ExistingValue) {
     $value = $ExistingValue
+    if ([string]::IsNullOrWhiteSpace($value) -and -not [string]::IsNullOrWhiteSpace($env:AUDIOBRIDGE_MAC_IP)) {
+        $value = $env:AUDIOBRIDGE_MAC_IP
+    }
     if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-MacViaTailscale }
-    if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-LikelyLocalMacIP }
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = Find-MacViaPan }
     while ($true) {
         if ([string]::IsNullOrWhiteSpace($value)) {
             Write-Host ''
             Write-Host 'Automatic Mac discovery did not find a reachable Mac.' -ForegroundColor Yellow
-            Write-Host 'On different phone hotspots, use the 100.x Tailscale address printed by the Mac receiver.' -ForegroundColor Yellow
-            $value = Read-Host 'Mac IPv4 address'
+            Write-Host 'Use any reachable address printed by the Mac receiver: LAN, Tailscale, or Bluetooth/PAN.' -ForegroundColor Yellow
+            $value = Read-Host 'Enter the Mac IPv4 address'
         }
-        [System.Net.IPAddress]$parsed = $null
-        if ([System.Net.IPAddress]::TryParse($value, [ref]$parsed) -and $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $value -ne '0.0.0.0') { return $value }
+        if (Test-UsableIPv4 $value) { return $value }
         Write-Host "'$value' is not a usable IPv4 address." -ForegroundColor Yellow
         $value = $null
     }
@@ -121,9 +161,11 @@ function Select-AudioDevice([string[]]$Devices, [string]$RequestedDevice) {
     if (-not [string]::IsNullOrWhiteSpace($RequestedDevice)) {
         $exact = $Devices | Where-Object { $_ -eq $RequestedDevice } | Select-Object -First 1
         if ($null -ne $exact) { return $exact }
+        Write-Host "Requested capture device was not found: $RequestedDevice" -ForegroundColor Yellow
     }
 
-    $preferred = @($Devices | Where-Object { $_ -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear' })
+    $systemAudioPattern = '(?i)virtual-audio-capturer|VoiceMeeter.*Output|Stereo Mix|What U Hear|Wave Out Mix|Loopback'
+    $preferred = @($Devices | Where-Object { $_ -match $systemAudioPattern })
     if ($preferred.Count -eq 1) {
         Write-Host "Auto-selected system-audio capture source: $($preferred[0])" -ForegroundColor Green
         return $preferred[0]
@@ -131,7 +173,7 @@ function Select-AudioDevice([string[]]$Devices, [string]$RequestedDevice) {
 
     Write-Host 'Available Windows recording/capture devices:'
     for ($i = 0; $i -lt $Devices.Count; $i++) {
-        $marker = if ($Devices[$i] -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear') { '  <-- system audio candidate' } else { '' }
+        $marker = if ($Devices[$i] -match $systemAudioPattern) { '  <-- system audio candidate' } else { '' }
         Write-Host ('  [{0}] {1}{2}' -f ($i + 1), $Devices[$i], $marker)
     }
 
@@ -146,7 +188,7 @@ function Select-AudioDevice([string[]]$Devices, [string]$RequestedDevice) {
     do {
         $selection = Read-Host 'Choose the system-audio capture-device number'
         $number = 0
-    } until ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $Devices.Count -and $Devices[$number - 1] -match '(?i)virtual-audio-capturer|VoiceMeeter Output|Stereo Mix|What U Hear')
+    } until ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $Devices.Count -and $Devices[$number - 1] -match $systemAudioPattern)
     return $Devices[$number - 1]
 }
 

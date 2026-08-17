@@ -22,15 +22,20 @@ find_tailscale_cli() {
 
 show_addresses() {
   printf 'Mac IPv4 addresses currently available:\n'
-  local dev ip hw_port marker found=0
+  local dev ip hw_port marker found=0 pan_found=0 pan_active=0
   while IFS= read -r dev; do
     [ -n "$dev" ] || continue
-    ip="$(ipconfig getifaddr "$dev" 2>/dev/null || true)"
-    [ -n "$ip" ] || continue
     hw_port="$(networksetup -listallhardwareports 2>/dev/null | awk -v d="$dev" '$1 == "Hardware" && $2 == "Port:" { sub(/^Hardware Port: /, ""); port=$0 } $1 == "Device:" && $2 == d { print port; exit }')"
     [ -n "$hw_port" ] || hw_port="network interface"
+    case "$hw_port" in
+      *Bluetooth*|*PAN*|*Pan*) pan_found=1 ;;
+    esac
+    ip="$(ipconfig getifaddr "$dev" 2>/dev/null || true)"
+    [ -n "$ip" ] || continue
     marker=""
-    case "$ip" in 192.168.137.*) marker="  <-- Windows hotspot/PAN candidate" ;; esac
+    case "$hw_port" in
+      *Bluetooth*|*PAN*|*Pan*) marker="  <-- active Bluetooth/PAN"; pan_active=1 ;;
+    esac
     printf '  %-8s  %-15s  %s%s\n' "$dev" "$ip" "$hw_port" "$marker"
     found=1
   done < <(ifconfig -l 2>/dev/null | tr ' ' '\n')
@@ -47,11 +52,19 @@ show_addresses() {
   fi
 
   [ "$found" -eq 1 ] || printf '  No active IPv4 address was detected.\n'
-  printf '\n'
+  if [ "$pan_active" -eq 1 ]; then
+    printf '\nBluetooth/PAN interface: detected and active.\n'
+  elif [ "$pan_found" -eq 1 ]; then
+    printf '\nBluetooth/PAN interface: detected, but it has no IPv4 address.\n'
+  else
+    printf '\nBluetooth/PAN interface: not detected.\n'
+    printf 'That is not fatal; Wi-Fi or Ethernet works when Windows can reach the listed Mac IPv4 address.\n'
+  fi
+  printf '\nGive the Windows sender any listed Mac IPv4 address that is reachable from Windows.\n\n'
 }
 
 printf '\n============================================================\n'
-printf ' Windows -> Mac Audio Receiver (LAN / Tailscale)\n'
+printf ' Windows -> Mac Audio Receiver (LAN / Tailscale / PAN)\n'
 printf '============================================================\n\n'
 
 FFPLAY="$(find_tool ffplay || true)"

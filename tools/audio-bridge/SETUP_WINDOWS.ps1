@@ -63,7 +63,7 @@ $ts = Find-Tailscale
 if ($null -eq $ts) {
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
     if ($null -ne $winget) {
-        Write-Host 'Installing Tailscale because the computers are on separate phone hotspots...'
+        Write-Host 'Installing Tailscale as an optional fallback when no shared LAN or Bluetooth/PAN route is available...'
         & $winget.Source install --id Tailscale.Tailscale --exact --source winget --accept-package-agreements --accept-source-agreements
         $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
