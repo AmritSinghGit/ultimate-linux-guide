@@ -14,6 +14,7 @@ EXPECTED_SHA256="f7f85f4973b4544f53dfda33fa286929c38ecbb15925febbad7b57c516112a6
 DOWNLOADS="${VCNOW_INSTALL_DOWNLOADS_DIR:-$HOME/Downloads}"
 ZIP_PATH="${VCNOW_PACKAGE_PATH:-$DOWNLOADS/$ZIP_NAME}"
 TARGET="$DOWNLOADS/$NAME"
+REPAIR_URL="https://raw.githubusercontent.com/AmritSinghGit/ultimate-linux-guide/main/tools/vcnow-digital-education/v0.3.0/repair-python-and-run.sh"
 
 banner() {
   printf '\n============================================================\n%s\n============================================================\n' "$1"
@@ -33,7 +34,7 @@ printf '%s\n' \
   "  • WhatsApp, PayU, Paynimo, LinkedIn, DigiLocker, Photos and Zoom gates" \
   "It does not change live WordPress, DNS, external providers or production data."
 
-for tool in unzip shasum; do
+for tool in unzip shasum curl; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
 
@@ -61,5 +62,9 @@ fi
 chmod +x ./*.command 2>/dev/null || true
 shasum -a 256 -c PACKAGE_MANIFEST.sha256
 
-banner "Starting the integrated local review"
-exec ./RUN_VCNOW_DIGITAL_EDUCATION.command
+banner "Selecting Python 3.11+ and continuing"
+REPAIR="$TARGET/review-data/repair-python-and-run.sh"
+mkdir -p "$(dirname "$REPAIR")"
+curl -fsSL "$REPAIR_URL" -o "$REPAIR"
+chmod 700 "$REPAIR"
+VCNOW_PACKAGE_ROOT="$TARGET" exec "$REPAIR"
