@@ -92,7 +92,7 @@ if [ -z "$PYTHON_BIN" ]; then
   [ -n "$BREW" ] || fail \
     "Python 3.11+ was not found and Homebrew is unavailable. Install Homebrew or Python 3.12, then rerun this command."
   banner "Installing Homebrew Python 3.12"
-  HOMEBREW_NO_AUTO_UPDATE=1 "$BREW" install python@3.12
+  "$BREW" install python@3.12
   prefix="$($BREW --prefix python@3.12)"
   PYTHON_BIN="$prefix/bin/python3.12"
   compatible_python "$PYTHON_BIN" || fail "Homebrew Python 3.12 did not become available"
